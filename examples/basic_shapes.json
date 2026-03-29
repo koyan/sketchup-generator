@@ -1,0 +1,25 @@
+{
+  "objects": [
+    {
+      "name": "small_cube",
+      "shape": "cube",
+      "parameters": {
+        "size": 50
+      },
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0],
+      "texture": "osb"
+    },
+    {
+      "name": "flat_box",
+      "shape": "rectangle",
+      "parameters": {
+        "width": 100,
+        "depth": 60,
+        "height": 30
+      },
+      "position": [100, 0, 0],
+      "rotation": [0, 0, 0]
+    }
+  ]
+}

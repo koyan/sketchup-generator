@@ -1,0 +1,17 @@
+# Primary 3D geometry library; handles mesh creation, boolean ops, and exports to OBJ, STL, GLB
+trimesh[easy]
+
+# Generates Collada (.dae) files — the richest SketchUp 2017 import format (materials, hierarchy)
+pycollada
+
+# Numerical arrays and linear algebra; required by trimesh and most 3D math
+numpy
+
+# Direct STL file read/write using NumPy arrays; useful for simple solid geometry exports
+numpy-stl
+
+# Image processing for textures and UV maps attached to 3D models
+Pillow
+
+# Spatial algorithms (convex hull, KD-tree, etc.) used internally by trimesh
+scipy
