@@ -93,107 +93,189 @@ def _embed_textures(dae_path: str, texture_map: dict) -> None:
 
 
 def write_collada(objects: list, output_path: str) -> None:
-    """Write a self-contained Collada .dae using pycollada.
+    """Write a self-contained Collada .dae using lxml for direct XML construction.
+
+    Writing the XML directly (rather than using pycollada) avoids pycollada's
+    automatic <transparency>1.0</transparency> output, which SketchUp interprets
+    as fully transparent and causes shapes to appear invisible/black.
 
     Textures are embedded as base64 data URIs so the file can be copied or
     shared without needing to carry the original image files alongside it.
 
-    Each entry in objects is a dict with:
+    Each entry in objects must be a leaf dict:
         mesh         trimesh.Trimesh
-        uv           np.ndarray | None  — (N, 2) UV coords; must be set when texture_path is set
-        texture_path str | None         — path to texture image file
-        name         str                — used as node / geometry identifier
+        uv           np.ndarray | None
+        texture_path str | None
+        name         str
     """
-    import collada
+    from lxml import etree as ET
 
-    c = collada.Collada()
-    c.assetInfo.upaxis    = "Y_UP"
-    c.assetInfo.unitmeter = 1.0
-    c.assetInfo.unitname  = "meter"
+    NS = "http://www.collada.org/2005/11/COLLADASchema"
+
+    def _sub(parent, tag, text=None, **attrs):
+        e = ET.SubElement(
+            parent, f"{{{NS}}}{tag}",
+            **{k: str(v) for k, v in attrs.items()},
+        )
+        if text is not None:
+            e.text = str(text)
+        return e
 
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
 
-    scene_nodes     = []
-    textures_to_embed = {}  # bare_filename → absolute_source_path
-
+    # Assign a stable index to every object
     for i, obj in enumerate(objects):
-        mesh     = obj["mesh"]
-        uv       = obj.get("uv")
+        obj["_idx"] = i
+
+    # --- Root ----------------------------------------------------------------
+    root = ET.Element(f"{{{NS}}}COLLADA", version="1.4.1", nsmap={None: NS})
+
+    # --- <asset> -------------------------------------------------------------
+    asset = _sub(root, "asset")
+    _sub(asset, "created",  text="2024-01-01")
+    _sub(asset, "modified", text="2024-01-01")
+    _sub(asset, "unit", name="meter", meter="1.0")
+    _sub(asset, "up_axis", text="Y_UP")
+
+    # --- <library_images> ----------------------------------------------------
+    textures_to_embed = {}  # bare_filename → abs_path
+    lib_images = _sub(root, "library_images")
+    for obj in objects:
+        i        = obj["_idx"]
         tex_path = obj.get("texture_path")
-        name     = obj.get("name", f"obj{i}")
-
-        # --- Material -------------------------------------------------------
-        if tex_path and uv is not None:
+        if tex_path and obj.get("uv") is not None:
             tex_filename = os.path.basename(tex_path)
-            # Register for post-write embedding; use a placeholder path for now
             textures_to_embed[tex_filename] = os.path.abspath(tex_path)
+            img_el = _sub(lib_images, "image", id=f"img_{i}", name=f"img_{i}")
+            _sub(img_el, "init_from", text="./" + tex_filename)
 
-            img     = collada.material.CImage(f"img_{i}",     "./" + tex_filename)
-            surface = collada.material.Surface(f"surf_{i}",   img, "2D")
-            sampler = collada.material.Sampler2D(f"samp_{i}", surface)
-            effect  = collada.material.Effect(
-                f"effect_{i}", [surface, sampler], "lambert",
-                diffuse=collada.material.Map(sampler, "UVSET0"),
-            )
-            c.images.append(img)
+    # --- <library_effects> ---------------------------------------------------
+    lib_effects = _sub(root, "library_effects")
+    for obj in objects:
+        i        = obj["_idx"]
+        tex_path = obj.get("texture_path")
+        uv       = obj.get("uv")
+        effect   = _sub(lib_effects, "effect", id=f"effect_{i}")
+        profile  = _sub(effect, "profile_COMMON")
+        if tex_path and uv is not None:
+            surf_param = _sub(profile, "newparam", sid=f"surf_{i}")
+            surface    = _sub(surf_param, "surface", type="2D")
+            _sub(surface, "init_from", text=f"img_{i}")
+            samp_param = _sub(profile, "newparam", sid=f"samp_{i}")
+            sampler    = _sub(samp_param, "sampler2D")
+            _sub(sampler, "source", text=f"surf_{i}")
+            tech    = _sub(profile, "technique", sid="common")
+            diffuse = _sub(_sub(tech, "lambert"), "diffuse")
+            _sub(diffuse, "texture", texture=f"samp_{i}", texcoord="UVSET0")
         else:
-            # Flat light grey matching the face_colors fallback (200/255 ≈ 0.784)
-            effect = collada.material.Effect(
-                f"effect_{i}", [], "lambert",
-                diffuse=(0.784, 0.784, 0.784, 1.0),
-            )
+            tech    = _sub(profile, "technique", sid="common")
+            diffuse = _sub(_sub(tech, "lambert"), "diffuse")
+            _sub(diffuse, "color", sid="diffuse", text="0.784 0.784 0.784 1.0")
 
-        mat = collada.material.Material(f"mat_{i}", name, effect)
-        c.effects.append(effect)
-        c.materials.append(mat)
+    # --- <library_materials> -------------------------------------------------
+    lib_mats = _sub(root, "library_materials")
+    for obj in objects:
+        i    = obj["_idx"]
+        name = obj.get("name", f"obj{i}")
+        mat  = _sub(lib_mats, "material", id=f"mat_{i}", name=name)
+        _sub(mat, "instance_effect", url=f"#effect_{i}")
 
-        # --- Geometry sources -----------------------------------------------
+    # --- <library_geometries> ------------------------------------------------
+    lib_geoms = _sub(root, "library_geometries")
+    for obj in objects:
+        i    = obj["_idx"]
+        mesh = obj["mesh"]
+        uv   = obj.get("uv")
+        name = obj.get("name", f"obj{i}")
+
         verts = mesh.vertices.astype(np.float32)
+        norms = (
+            np.repeat(mesh.face_normals, 3, axis=0).astype(np.float32)
+            if uv is not None
+            else mesh.vertex_normals.astype(np.float32)
+        )
 
+        geom_el = _sub(lib_geoms, "geometry", id=f"geom_{i}", name=name)
+        mesh_el = _sub(geom_el,   "mesh")
+
+        # Position source
+        v_count = len(verts)
+        src_v   = _sub(mesh_el, "source", id=f"verts_{i}")
+        _sub(src_v, "float_array", id=f"verts_{i}-array", count=str(v_count * 3),
+             text=" ".join(f"{x:.6g}" for x in verts.ravel()))
+        acc_v = _sub(_sub(src_v, "technique_common"), "accessor",
+                     source=f"#verts_{i}-array", count=str(v_count), stride="3")
+        for ax in ("X", "Y", "Z"):
+            _sub(acc_v, "param", name=ax, type="float")
+
+        # Normal source
+        n_count = len(norms)
+        src_n   = _sub(mesh_el, "source", id=f"norms_{i}")
+        _sub(src_n, "float_array", id=f"norms_{i}-array", count=str(n_count * 3),
+             text=" ".join(f"{x:.6g}" for x in norms.ravel()))
+        acc_n = _sub(_sub(src_n, "technique_common"), "accessor",
+                     source=f"#norms_{i}-array", count=str(n_count), stride="3")
+        for ax in ("X", "Y", "Z"):
+            _sub(acc_n, "param", name=ax, type="float")
+
+        # UV source
         if uv is not None:
-            # Unshared mesh: one face normal per vertex (repeat 3× per face)
-            norms = np.repeat(mesh.face_normals, 3, axis=0).astype(np.float32)
-        else:
-            # Shared-vertex mesh: smooth per-vertex normals for better shading
-            norms = mesh.vertex_normals.astype(np.float32)
+            uv_arr   = uv.astype(np.float32)
+            uv_count = len(uv_arr)
+            src_uv   = _sub(mesh_el, "source", id=f"uvs_{i}")
+            _sub(src_uv, "float_array", id=f"uvs_{i}-array", count=str(uv_count * 2),
+                 text=" ".join(f"{x:.6g}" for x in uv_arr.ravel()))
+            acc_uv = _sub(_sub(src_uv, "technique_common"), "accessor",
+                          source=f"#uvs_{i}-array", count=str(uv_count), stride="2")
+            for ax in ("S", "T"):
+                _sub(acc_uv, "param", name=ax, type="float")
 
-        vert_src = collada.source.FloatSource(f"verts_{i}", verts.ravel(), ("X", "Y", "Z"))
-        norm_src = collada.source.FloatSource(f"norms_{i}", norms.ravel(), ("X", "Y", "Z"))
-        sources  = [vert_src, norm_src]
+        # <vertices> — required bridge element in the COLLADA spec
+        verts_vtx = _sub(mesh_el, "vertices", id=f"verts_{i}-vtx")
+        _sub(verts_vtx, "input", semantic="POSITION", source=f"#verts_{i}")
 
-        inlist = collada.source.InputList()
-        inlist.addInput(0, "VERTEX",  f"#verts_{i}")
-        inlist.addInput(1, "NORMAL",  f"#norms_{i}")
-
+        # <triangles>
+        tri_count = len(mesh.faces)
+        tri_el    = _sub(mesh_el, "triangles", count=str(tri_count), material=f"mat_{i}")
+        _sub(tri_el, "input", semantic="VERTEX",   source=f"#verts_{i}-vtx", offset="0")
+        _sub(tri_el, "input", semantic="NORMAL",   source=f"#norms_{i}",     offset="1")
         if uv is not None:
-            uv_src = collada.source.FloatSource(f"uvs_{i}", uv.astype(np.float32).ravel(), ("S", "T"))
-            sources.append(uv_src)
-            inlist.addInput(2, "TEXCOORD", f"#uvs_{i}", set="0")
+            _sub(tri_el, "input", semantic="TEXCOORD", source=f"#uvs_{i}", offset="2", set="0")
             flat    = np.arange(len(verts))
             indices = np.column_stack([flat, flat, flat]).ravel()
         else:
             face_idx = mesh.faces.ravel()
             indices  = np.column_stack([face_idx, face_idx]).ravel()
+        _sub(tri_el, "p", text=" ".join(str(x) for x in indices))
 
-        geom   = collada.geometry.Geometry(c, f"geom_{i}", name, sources)
-        triset = geom.createTriangleSet(indices, inlist, f"mat_{i}")
-        geom.primitives.append(triset)
-        c.geometries.append(geom)
+    # --- <library_visual_scenes> ---------------------------------------------
+    lib_vs    = _sub(root, "library_visual_scenes")
+    vis_scene = _sub(lib_vs, "visual_scene", id="scene", name="scene")
 
-        # --- Scene node -----------------------------------------------------
-        matnode  = collada.scene.MaterialNode(f"mat_{i}", mat, inputs=[])
-        geomnode = collada.scene.GeometryNode(geom, [matnode])
-        node     = collada.scene.Node(f"node_{i}", children=[geomnode])
-        scene_nodes.append(node)
+    for obj in objects:
+        i        = obj["_idx"]
+        name     = obj.get("name", f"obj{i}")
+        safe_id  = name.replace(" ", "_")
+        node_el  = _sub(vis_scene, "node", id=f"node_{i}", name=safe_id, type="NODE")
+        inst     = _sub(node_el, "instance_geometry", url=f"#geom_{i}")
+        bind     = _sub(inst, "bind_material")
+        tech     = _sub(bind, "technique_common")
+        inst_mat = _sub(tech, "instance_material",
+                        symbol=f"mat_{i}", target=f"#mat_{i}")
+        if obj.get("texture_path") and obj.get("uv") is not None:
+            _sub(inst_mat, "bind_vertex_input",
+                 semantic="UVSET0", input_semantic="TEXCOORD", input_set="0")
 
-    root = collada.scene.Scene("scene", scene_nodes)
-    c.scenes.append(root)
-    c.scene = root
-    c.write(output_path)
+    # --- <scene> -------------------------------------------------------------
+    scene_el = _sub(root, "scene")
+    _sub(scene_el, "instance_visual_scene", url="#scene")
 
-    # Post-process: replace file references with embedded base64 data URIs so
-    # the .dae is fully self-contained and portable without a separate texture file.
+    # --- Write ---------------------------------------------------------------
+    tree = ET.ElementTree(root)
+    tree.write(output_path, xml_declaration=True, encoding="utf-8", pretty_print=True)
+
+    # Post-process: replace ./filename references with embedded base64 data URIs.
     if textures_to_embed:
         _embed_textures(output_path, textures_to_embed)
 
@@ -219,11 +301,13 @@ def build_rectangle(width_mm: float, depth_mm: float, height_mm: float) -> trime
     ])
 
 
-def build_cylinder(radius_mm: float, height_mm: float, axis: str) -> trimesh.Trimesh:
-    """Return a cylinder mesh with the given radius and height.
+def build_cylinder(radius_mm: float, height_mm: float, axis: str, inner_radius_mm: float = 0) -> trimesh.Trimesh:
+    """Return a cylinder (or hollow tube) mesh.
 
     axis controls which world axis the cylinder runs along:
       'z' → vertical (default), 'x' → left-right, 'y' → front-back.
+    inner_radius_mm > 0 hollows the cylinder by boolean-subtracting a coaxial
+      inner cylinder, producing a tube with the given bore radius.
     sections=64 gives a smooth circular cross-section without excessive faces.
     """
     mesh = trimesh.creation.cylinder(
@@ -231,6 +315,20 @@ def build_cylinder(radius_mm: float, height_mm: float, axis: str) -> trimesh.Tri
         height=height_mm * MM_TO_M,
         sections=64,
     )
+
+    if inner_radius_mm > 0:
+        if inner_radius_mm >= radius_mm:
+            raise ValueError(
+                f"--inner-radius ({inner_radius_mm}) must be less than --radius ({radius_mm})"
+            )
+        # Subtract a slightly taller inner cylinder to guarantee clean cap faces
+        inner = trimesh.creation.cylinder(
+            radius=inner_radius_mm * MM_TO_M,
+            height=height_mm * MM_TO_M * 1.01,
+            sections=64,
+        )
+        mesh = trimesh.boolean.difference([mesh, inner])
+
     # trimesh generates cylinders along Z. SketchUp reads Collada as Y-up, so:
     #   axis='z' (vertical)   → align with trimesh Y: rotate Z → Y (-90° around X)
     #   axis='x' (left-right) → align with trimesh X: rotate Z → X (+90° around Y)
@@ -321,7 +419,7 @@ def build_sphere(radius_mm: float) -> trimesh.Trimesh:
 SHAPES = {
     "cube": lambda args: build_cube(args.size),
     "rectangle": lambda args: build_rectangle(args.width, args.depth, args.height),
-    "cylinder": lambda args: build_cylinder(args.radius, args.height, args.axis),
+    "cylinder": lambda args: build_cylinder(args.radius, args.height, args.axis, args.inner_radius),
     "lead_screw": lambda args: build_lead_screw(args.length, args.diameter, args.pitch, args.hand),
     "sphere": lambda args: build_sphere(args.radius),
 }
@@ -381,7 +479,14 @@ def parse_args() -> argparse.Namespace:
         "--radius",
         type=float,
         default=50.0,
-        help="Radius in millimetres, used by: sphere (default: 50)",
+        help="Outer radius in millimetres, used by: cylinder, sphere (default: 50)",
+    )
+    parser.add_argument(
+        "--inner-radius",
+        dest="inner_radius",
+        type=float,
+        default=0.0,
+        help="Inner bore radius in millimetres; hollows the cylinder when > 0, used by: cylinder (default: 0)",
     )
     parser.add_argument(
         "--length",

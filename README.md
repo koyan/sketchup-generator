@@ -8,7 +8,13 @@ Everything runs inside a Docker container — no local Python environment requir
 
 ## Getting Started
 
-**Build the image and open a shell:**
+**Build the image **
+
+```bash
+make build
+```
+
+**Open a shell:**
 
 ```bash
 make bash
@@ -16,7 +22,7 @@ make bash
 
 Your project directory is volume-mounted to `/app` inside the container, so any file you edit on the host is immediately available, and any generated file appears on the host without a rebuild.
 
-The only time you need to re-run `make bash` (which triggers a rebuild) is when `requirements.txt` changes.
+The only time you need to re-run `make build` (which triggers a rebuild) is when `requirements.txt` changes.
 
 ---
 
@@ -38,7 +44,7 @@ The output format is inferred from the file extension. Supported: `.dae`, `.obj`
 |---|---|
 | `cube` | `--size` (mm) |
 | `rectangle` | `--width`, `--depth`, `--height` (mm) |
-| `cylinder` | `--radius`, `--height` (mm), `--axis` (`x`/`y`/`z`) |
+| `cylinder` | `--radius`, `--height` (mm), `--inner-radius` (mm),`--axis` (`x`/`y`/`z`) |
 | `sphere` | `--radius` (mm) |
 | `lead_screw` | `--length`, `--diameter`, `--pitch` (mm), `--hand` (`right`/`left`) |
 
@@ -116,7 +122,7 @@ Output defaults to `<input stem>.dae`.
 |---|---|---|---|
 | `name` | string | No | Label used in output and node IDs |
 | `shape` | string | Yes | One of the shapes listed above |
-| `parameters` | object | No | Shape-specific parameters (same names as CLI flags). Unset parameters use the same defaults as `generate.py`. |
+| `parameters` | object | No | Shape-specific parameters. Use **underscores** in key names (e.g. `inner_radius`), not hyphens. Unset parameters use the same defaults as `generate.py`. |
 | `position` | `[x, y, z]` | No | Position in mm. Defaults to `[0, 0, 0]`. |
 | `rotation` | `[rx, ry, rz]` | No | Euler rotation in degrees, XYZ order. Defaults to `[0, 0, 0]`. |
 | `texture` | string | No | Texture name stem (see Textures section). Omit for flat grey. |
@@ -174,7 +180,7 @@ sketchup-generator/
 ├── Makefile
 ├── textures/            # Texture images (not committed — add your own)
 ├── examples/            # Example JSON scene files
-│   └── basic_shapes.json
+│   └── basic_shapes.json  # Rectangle + cube scene
 └── output/              # Generated .dae files (gitignored)
 ```
 

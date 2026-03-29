@@ -18,53 +18,14 @@ PARAM_DEFAULTS = {
     "width":    100.0,
     "depth":    100.0,
     "height":   100.0,
-    "radius":    50.0,
-    "axis":       "z",
+    "radius":       50.0,
+    "inner_radius":  0.0,
+    "axis":          "z",
     "length":   200.0,
     "diameter":   8.0,
     "pitch":      2.0,
     "hand":   "right",
 }
-
-
-def build_object(obj_def: dict, label: str) -> dict:
-    """Build and position a single object; return a dict ready for write_collada.
-
-    Rotation is applied before UV projection so the texture aligns with the
-    object's final orientation. Translation is applied after UV projection so
-    the tiling offset reflects world-space position.
-    """
-    shape = obj_def["shape"]
-    if shape not in SHAPES:
-        raise ValueError(f"Unknown shape '{shape}'. Available: {list(SHAPES.keys())}")
-
-    params = SimpleNamespace(**{**PARAM_DEFAULTS, **obj_def.get("parameters", {})})
-    mesh   = SHAPES[shape](params)
-
-    # Rotation before texture so UV normals match the final orientation
-    rotation = obj_def.get("rotation", [0, 0, 0])
-    if any(r != 0 for r in rotation):
-        rx, ry, rz = (np.radians(r) for r in rotation)
-        matrix = trimesh.transformations.euler_matrix(rx, ry, rz)
-        mesh.apply_transform(matrix)
-
-    # Texture (UV projection uses post-rotation geometry)
-    uv           = None
-    texture_path = None
-    texture_name = obj_def.get("texture")
-    if texture_name:
-        path = find_texture(texture_name)
-        if path is None:
-            print(f"  Warning: texture '{texture_name}' not found in {TEXTURES_DIR}/, using grey")
-        else:
-            mesh, uv = apply_texture(mesh, path)
-            texture_path = path
-
-    # Translation after UV so world-space tiling is consistent across objects
-    position = obj_def.get("position", [0, 0, 0])
-    mesh.apply_translation([p * MM_TO_M for p in position])
-
-    return {"mesh": mesh, "uv": uv, "texture_path": texture_path, "name": label}
 
 
 def main() -> None:
@@ -93,8 +54,37 @@ def main() -> None:
     built = []
     for i, obj_def in enumerate(objects):
         label = obj_def.get("name") or f"object_{i}"
-        print(f"  Building {label} ({obj_def['shape']})...")
-        built.append(build_object(obj_def, label))
+        shape = obj_def["shape"]
+        if shape not in SHAPES:
+            raise ValueError(f"Unknown shape '{shape}'. Available: {list(SHAPES.keys())}")
+
+        print(f"  Building {label} ({shape})...")
+        params = SimpleNamespace(**{**PARAM_DEFAULTS, **obj_def.get("parameters", {})})
+        mesh   = SHAPES[shape](params)
+
+        # Rotation before texture so UV normals match the final orientation
+        rotation = obj_def.get("rotation", [0, 0, 0])
+        if any(r != 0 for r in rotation):
+            rx, ry, rz = (np.radians(r) for r in rotation)
+            mesh.apply_transform(trimesh.transformations.euler_matrix(rx, ry, rz))
+
+        # Texture (UV projection uses post-rotation geometry)
+        uv           = None
+        texture_path = None
+        texture_name = obj_def.get("texture")
+        if texture_name:
+            path = find_texture(texture_name)
+            if path is None:
+                print(f"  Warning: texture '{texture_name}' not found in {TEXTURES_DIR}/, using grey")
+            else:
+                mesh, uv = apply_texture(mesh, path)
+                texture_path = path
+
+        # Translation after UV so tiling offset reflects position
+        position = obj_def.get("position", [0, 0, 0])
+        mesh.apply_translation([p * MM_TO_M for p in position])
+
+        built.append({"mesh": mesh, "uv": uv, "texture_path": texture_path, "name": label})
 
     output_path = args.output or args.input.rsplit(".", 1)[0] + ".dae"
 
